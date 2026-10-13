@@ -12,11 +12,20 @@ class SimpleRateLimiter(BaseRateLimiter):
         self._chat_last = {}
         self._lock = asyncio.Lock()
 
-    async def process_request(self, callback, args, kwargs):
+    async def initialize(self) -> None:
+        return
+
+    async def shutdown(self) -> None:
+        return
+
+    async def process_request(self, callback, args, kwargs, endpoint, data, rate_limit_args):
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self._global_last
-            self._global_tokens = min(self.per_second, self._global_tokens + elapsed * self.per_second)
+            self._global_tokens = min(
+                self.per_second,
+                self._global_tokens + elapsed * self.per_second,
+            )
             self._global_last = now
             if self._global_tokens < 1:
                 wait = (1 - self._global_tokens) / self.per_second
@@ -26,11 +35,15 @@ class SimpleRateLimiter(BaseRateLimiter):
                 self._global_tokens -= 1
 
             chat_id = None
-            if len(args) > 0:
+            if isinstance(data, dict):
+                chat_id = data.get("chat_id")
+            if chat_id is None and len(args) > 0:
                 first = args[0]
-                chat_id = getattr(first, "chat_id", None) or getattr(getattr(first, "chat", None), "id", None)
-            if chat_id is None and "chat_id" in kwargs:
-                chat_id = kwargs["chat_id"]
+                chat_id = getattr(first, "chat_id", None) or getattr(
+                    getattr(first, "chat", None), "id", None
+                )
+            if chat_id is None and isinstance(kwargs, dict):
+                chat_id = kwargs.get("chat_id")
 
             if chat_id is not None:
                 last = self._chat_last.get(chat_id, 0.0)
