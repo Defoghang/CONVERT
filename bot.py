@@ -12,6 +12,7 @@ from handlers import (
     cmd_crackmask, cmd_crackhybrid, cmd_crackinc, cmd_crackincm,
     cmd_cracksingle, cmd_johninfo, cmd_wordlist, cmd_formats,
     cmd_rules, cmd_extractors, cmd_extract,
+    cmd_pdfcrack, cmd_pdfinfo,
     handle_message, handle_document, error_handler,
 )
 
@@ -54,6 +55,8 @@ def main():
     application.add_handler(CommandHandler("rules", cmd_rules))
     application.add_handler(CommandHandler("extractors", cmd_extractors))
     application.add_handler(CommandHandler("extract", cmd_extract))
+    application.add_handler(CommandHandler("pdfinfo", cmd_pdfinfo))
+    application.add_handler(CommandHandler("pdfcrack", cmd_pdfcrack))
     application.add_handler(CommandHandler("crack", cmd_crack))
     application.add_handler(CommandHandler("crackf", cmd_crackf))
     application.add_handler(CommandHandler("crackrules", cmd_crackrules))

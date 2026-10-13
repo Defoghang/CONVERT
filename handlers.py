@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shutil
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -24,11 +25,22 @@ from john_service import (
     is_john_available,
     find_john_binary,
 )
+from pdf_service import (
+    PdfError,
+    extract_pdf_hash,
+    decrypt_pdf,
+    make_session_dir,
+    cleanup_dir,
+    validate_pdf,
+    find_pdf2john,
+    is_qpdf_available,
+)
 
 logger = logging.getLogger(__name__)
 
 WORDLIST_PATH = "/usr/share/wordlists/rockyou.txt"
 MAX_TELEGRAM_MESSAGE = 4000
+PDF_MAX_FILE_SIZE = 20 * 1024 * 1024
 
 MASK_TOKEN_RE = re.compile(r"^[?a-zA-Z0-9,\-\[\]:. ]{1,120}$")
 FORMAT_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,50}$")
@@ -60,6 +72,14 @@ def _format_crack_result(result, title):
     return _truncate("\n".join(lines))
 
 
+def _sanitize_filename(name):
+    if not name:
+        return "document.pdf"
+    name = os.path.basename(name)
+    name = re.sub(r"[^a-zA-Z0-9._\-]", "_", name)
+    return name[:120] or "document.pdf"
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
@@ -79,6 +99,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Afficher cette aide\n"
         "/echo <texte> - Repeter un texte\n"
         "/stats - Afficher les statistiques\n\n"
+        "PDF - cassage et deverrouillage :\n"
+        "/pdfcrack - Reponds a un PDF chiffre avec cette commande\n"
+        "/pdfinfo - Verifie la disponibilite de pdf2john et qpdf\n\n"
         "Commandes admin - John the Ripper :\n"
         "/status - Etat du bot et des outils\n"
         "/johninfo - Version de John\n"
@@ -95,7 +118,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Cassage exhaustif :\n"
         "/crackinc <hash> - Mode incremental\n"
         "/crackincm <mode> <hash> - Mode incremental nomme\n"
-        "/cracksingle <hash> - Mode single (username-aware)\n\n"
+        "/cracksingle <hash> - Mode single\n\n"
         "Extraction de hash depuis fichiers :\n"
         "/extractors - Lister les extracteurs disponibles\n"
         "/extract <type> - Extraire depuis un fichier envoye"
@@ -123,13 +146,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     john_status = f"OK ({binary})" if binary else "INDISPONIBLE"
     wordlist_status = "OK" if os.path.isfile(WORDLIST_PATH) else "ABSENTE"
     extractors = available_extractors()
+    pdf2john = find_pdf2john()
+    qpdf_status = "OK" if is_qpdf_available() else "ABSENT"
     await update.message.reply_text(
         f"Bot en ligne.\n"
         f"Base de donnees : OK\n"
         f"Rate limiter : actif\n"
         f"John the Ripper : {john_status}\n"
         f"Wordlist rockyou : {wordlist_status}\n"
-        f"Extracteurs disponibles : {len(extractors)}"
+        f"pdf2john : {pdf2john or 'ABSENT'}\n"
+        f"qpdf : {qpdf_status}\n"
+        f"Extracteurs : {len(extractors)}"
     )
 
 
@@ -155,10 +182,7 @@ async def cmd_wordlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Wordlist presente.\nChemin : {WORDLIST_PATH}\nTaille : {size} octets"
         )
     else:
-        await update.message.reply_text(
-            f"Wordlist absente : {WORDLIST_PATH}\n"
-            "Elle sera installee par le workflow GitHub Actions."
-        )
+        await update.message.reply_text(f"Wordlist absente : {WORDLIST_PATH}")
 
 
 async def cmd_formats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,8 +206,7 @@ async def cmd_formats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current += f"{fmt}\n"
     if current:
         chunks.append(current)
-    header = f"{len(formats)} formats supportes :\n\n"
-    await update.message.reply_text(header + chunks[0])
+    await update.message.reply_text(f"{len(formats)} formats supportes :\n\n" + chunks[0])
     for chunk in chunks[1:4]:
         await update.message.reply_text(chunk)
 
@@ -209,17 +232,14 @@ async def cmd_crack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage : /crack <hash1> [hash2] ...\n"
-            "Exemple : /crack 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+        await update.message.reply_text("Usage : /crack <hash1> [hash2] ...")
         return
     try:
         hashes = validate_hashes(" ".join(context.args))
     except JohnError as exc:
         await update.message.reply_text(f"Erreur de validation : {exc}")
         return
-    await update.message.reply_text(f"Cassage de {len(hashes)} hash(es) par dictionnaire...")
+    await update.message.reply_text(f"Cassage de {len(hashes)} hash(es)...")
     result = None
     try:
         result = crack_hashes(hashes, wordlist=WORDLIST_PATH)
@@ -227,7 +247,7 @@ async def cmd_crack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Erreur John : {exc}")
         return
     try:
-        await update.message.reply_text(_format_crack_result(result, "Mode : dictionnaire + regles Jumbo"))
+        await update.message.reply_text(_format_crack_result(result, "Dictionnaire + regles Jumbo"))
     finally:
         cleanup_workdir(result["workdir"])
 
@@ -237,10 +257,7 @@ async def cmd_crackf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage : /crackf <format> <hash1> [hash2] ...\n"
-            "Exemple : /crackf raw-md5 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+        await update.message.reply_text("Usage : /crackf <format> <hash1> [hash2] ...")
         return
     john_format = context.args[0].strip()
     if not FORMAT_RE.match(john_format):
@@ -269,11 +286,7 @@ async def cmd_crackrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage : /crackrules <rules> <hash1> [hash2] ...\n"
-            "Exemples de regles : Jumbo, best64, d3ad0ne, KoreLogic\n"
-            "Exemple : /crackrules best64 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+        await update.message.reply_text("Usage : /crackrules <rules> <hash1> ...")
         return
     rules = context.args[0].strip()
     if not RULES_RE.match(rules):
@@ -302,11 +315,7 @@ async def cmd_crackmask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage : /crackmask <mask> <hash1> [hash2] ...\n"
-            "Placeholders : ?l minuscule, ?u majuscule, ?d chiffre, ?s symbole, ?a tous\n"
-            "Exemple : /crackmask ?l?l?l?l?d?d 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+        await update.message.reply_text("Usage : /crackmask <mask> <hash1> ...")
         return
     mask = context.args[0].strip()
     if not MASK_TOKEN_RE.match(mask) or "?" not in mask:
@@ -334,12 +343,8 @@ async def cmd_crackhybrid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         await update.message.reply_text("Acces refuse.")
         return
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Usage : /crackhybrid <mask> <hash1> [hash2] ...\n"
-            "Combine rockyou.txt avec un masque en suffixe.\n"
-            "Exemple : /crackhybrid ?d?d?d 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage : /crackhybrid <mask> <hash1> ...")
         return
     mask = context.args[0].strip()
     if not MASK_TOKEN_RE.match(mask) or "?" not in mask:
@@ -353,7 +358,7 @@ async def cmd_crackhybrid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except JohnError as exc:
         await update.message.reply_text(f"Erreur de validation : {exc}")
         return
-    await update.message.reply_text(f"Attaque hybride wordlist + masque {mask}...")
+    await update.message.reply_text(f"Hybride wordlist + masque {mask}...")
     result = None
     try:
         result = crack_hybrid(hashes, WORDLIST_PATH, mask)
@@ -371,10 +376,7 @@ async def cmd_crackinc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage : /crackinc <hash1> [hash2] ...\n"
-            "Mode incremental exhaustif (peut etre tres long)."
-        )
+        await update.message.reply_text("Usage : /crackinc <hash1> ...")
         return
     try:
         hashes = validate_hashes(" ".join(context.args))
@@ -389,7 +391,7 @@ async def cmd_crackinc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Erreur John : {exc}")
         return
     try:
-        await update.message.reply_text(_format_crack_result(result, "Mode : incremental (1-8 chars)"))
+        await update.message.reply_text(_format_crack_result(result, "Incremental (1-8)"))
     finally:
         cleanup_workdir(result["workdir"])
 
@@ -399,11 +401,7 @@ async def cmd_crackincm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage : /crackincm <mode> <hash1> [hash2] ...\n"
-            "Modes courants : digits, alpha, alnum, all, lower, upper\n"
-            "Exemple : /crackincm digits 5f4dcc3b5aa765d61d8327deb882cf99"
-        )
+        await update.message.reply_text("Usage : /crackincm <mode> <hash1> ...")
         return
     mode = context.args[0].strip()
     if not FORMAT_RE.match(mode):
@@ -432,10 +430,7 @@ async def cmd_cracksingle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage : /cracksingle <hash1> [hash2] ...\n"
-            "Mode single : utilise les informations du hash comme base."
-        )
+        await update.message.reply_text("Usage : /cracksingle <hash1> ...")
         return
     try:
         hashes = validate_hashes(" ".join(context.args))
@@ -450,7 +445,7 @@ async def cmd_cracksingle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Erreur John : {exc}")
         return
     try:
-        await update.message.reply_text(_format_crack_result(result, "Mode : single"))
+        await update.message.reply_text(_format_crack_result(result, "Mode single"))
     finally:
         cleanup_workdir(result["workdir"])
 
@@ -474,21 +469,11 @@ async def cmd_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acces refuse.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage : /extract <type>\n"
-            "Envoie ensuite le fichier en piece jointe avec la legende /extract <type>.\n"
-            "Exemple : /extract zip2john (avec un fichier .zip en piece jointe)"
-        )
+        await update.message.reply_text("Usage : /extract <type> (avec un fichier joint)")
         return
     extractor_name = context.args[0].strip()
     if not FORMAT_RE.match(extractor_name):
         await update.message.reply_text("Nom d'extracteur invalide.")
-        return
-    if not update.message.document and not update.message.reply_to_message:
-        await update.message.reply_text(
-            "Envoie un fichier avec la commande en legende.\n"
-            "Ou reponds a un fichier deja envoye avec /extract <type>."
-        )
         return
     target_doc = None
     if update.message.document:
@@ -501,13 +486,13 @@ async def cmd_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_doc.file_size and target_doc.file_size > 50 * 1024 * 1024:
         await update.message.reply_text("Fichier trop volumineux (max 50 Mo).")
         return
-    status_msg = await update.message.reply_text(f"Telechargement du fichier pour {extractor_name}...")
+    status_msg = await update.message.reply_text(f"Telechargement pour {extractor_name}...")
     tmpdir = None
     try:
         tg_file = await target_doc.get_file()
         tmpdir = os.path.join("/tmp", f"extract_{target_doc.file_unique_id}")
         os.makedirs(tmpdir, exist_ok=True)
-        file_path = os.path.join(tmpdir, target_doc.file_name or "input.bin")
+        file_path = os.path.join(tmpdir, _sanitize_filename(target_doc.file_name) or "input.bin")
         await tg_file.download_to_drive(file_path)
         await status_msg.edit_text(f"Extraction avec {extractor_name}...")
         result = extract_hash_from_file(file_path, extractor_name)
@@ -516,15 +501,137 @@ async def cmd_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Extracteur : {result['extractor']}\n"
             f"Taille : {result['file_size']} octets\n\n"
             f"Hash extrait :\n{result['hash_line']}\n\n"
-            f"Pour casser : /crackf <format> {result['hash_line'].split(':')[0]}"
+            f"Pour casser : /crack <hash>"
         )
         await status_msg.edit_text(_truncate(text))
     except JohnError as exc:
         await status_msg.edit_text(f"Erreur : {exc}")
     finally:
         if tmpdir and os.path.isdir(tmpdir):
-            import shutil as _shutil
-            _shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def cmd_pdfinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    pdf2john = find_pdf2john()
+    qpdf = is_qpdf_available()
+    await update.message.reply_text(
+        f"pdf2john : {pdf2john or 'ABSENT'}\n"
+        f"qpdf : {'OK' if qpdf else 'ABSENT'}\n"
+        f"Wordlist rockyou : {'OK' if os.path.isfile(WORDLIST_PATH) else 'ABSENTE'}"
+    )
+
+
+async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+
+    target_doc = None
+    if update.message.document:
+        target_doc = update.message.document
+    elif update.message.reply_to_message and update.message.reply_to_message.document:
+        target_doc = update.message.reply_to_message.document
+
+    if not target_doc:
+        await update.message.reply_text(
+            "Envoie un PDF en piece jointe avec la legende /pdfcrack,\n"
+            "ou reponds a un PDF deja envoye avec /pdfcrack."
+        )
+        return
+
+    file_name = _sanitize_filename(target_doc.file_name or "document.pdf")
+    if not file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("Le fichier doit etre un PDF.")
+        return
+    if target_doc.file_size and target_doc.file_size > PDF_MAX_FILE_SIZE:
+        await update.message.reply_text(f"PDF trop volumineux (max 20 Mo).")
+        return
+    if not find_pdf2john():
+        await update.message.reply_text("pdf2john indisponible sur cet environnement.")
+        return
+    if not is_qpdf_available():
+        await update.message.reply_text("qpdf indisponible, deverrouillage impossible.")
+        return
+    if not os.path.isfile(WORDLIST_PATH):
+        await update.message.reply_text(f"Wordlist absente : {WORDLIST_PATH}")
+        return
+
+    session_id, workdir = make_session_dir()
+    status_msg = await update.message.reply_text("Telechargement du PDF...")
+
+    try:
+        tg_file = await target_doc.get_file()
+        pdf_path = os.path.join(workdir, file_name)
+        await tg_file.download_to_drive(pdf_path)
+
+        try:
+            validate_pdf(pdf_path)
+        except PdfError as exc:
+            await status_msg.edit_text(f"PDF invalide : {exc}")
+            return
+
+        await status_msg.edit_text("Extraction du hash PDF avec pdf2john...")
+        try:
+            extracted = extract_pdf_hash(pdf_path)
+        except PdfError as exc:
+            await status_msg.edit_text(f"Erreur d'extraction : {exc}")
+            return
+
+        hash_line = extracted["hash_line"]
+        short_hash = hash_line.split(":")[-1][:80]
+        await status_msg.edit_text(
+            f"Hash extrait :\n{short_hash}...\n\n"
+            f"Cassage en cours avec rockyou + regles Jumbo..."
+        )
+
+        crack_result = None
+        try:
+            crack_result = crack_hashes([hash_line], wordlist=WORDLIST_PATH)
+        except JohnError as exc:
+            await status_msg.edit_text(f"Erreur John : {exc}")
+            return
+
+        try:
+            if not crack_result["cracked"]:
+                await status_msg.edit_text(
+                    "Aucun mot de passe trouve avec rockyou.\n"
+                    "Le mot de passe est probablement trop complexe pour cette wordlist."
+                )
+                return
+
+            password = next(iter(crack_result["cracked"].values()))
+            await status_msg.edit_text(
+                f"Mot de passe trouve : {password}\n"
+                f"Deverrouillage du PDF avec qpdf..."
+            )
+
+            unlocked_path = os.path.join(workdir, "unlocked_" + file_name)
+            try:
+                decrypt_pdf(pdf_path, password, unlocked_path)
+            except PdfError as exc:
+                await status_msg.edit_text(
+                    f"Mot de passe trouve ({password}) mais echec de deverrouillage :\n{exc}"
+                )
+                return
+
+            await status_msg.edit_text("Envoi du PDF deverrouille...")
+            with open(unlocked_path, "rb") as fh:
+                await update.message.reply_document(
+                    document=fh,
+                    filename="unlocked_" + file_name,
+                    caption=f"Mot de passe : {password}",
+                )
+            await status_msg.edit_text(
+                f"PDF deverrouille et envoye.\nMot de passe : {password}"
+            )
+        finally:
+            if crack_result:
+                cleanup_workdir(crack_result["workdir"])
+    finally:
+        cleanup_dir(workdir)
 
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -549,14 +656,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         return
-    if not update.message.document:
+    if not update.message or not update.message.document:
         return
     caption = update.message.caption or ""
-    if caption.startswith("/extract"):
-        parts = caption.split()
-        if len(parts) >= 2:
-            extractor_name = parts[1].strip()
-            await cmd_extract(update, context, _forced_extractor=extractor_name)
+    parts = caption.split()
+    if not parts:
+        return
+    command = parts[0].split("@")[0]
+    if command == "/pdfcrack":
+        await cmd_pdfcrack(update, context)
+        return
+    if command == "/extract" and len(parts) >= 2:
+        context.args = parts[1:]
+        await cmd_extract(update, context)
+        return
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
