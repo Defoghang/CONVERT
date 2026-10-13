@@ -5,6 +5,10 @@ on:
   repository_dispatch:
     types: [restart-bot]
 
+concurrency:
+  group: telegram-bot-runner
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -49,7 +53,7 @@ jobs:
         run: python bot.py
 
       - name: Restart workflow
-        if: always()
+        if: always() && !cancelled()
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.GH_PAT }}
