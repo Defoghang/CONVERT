@@ -1,8 +1,6 @@
 name: Run Telegram Bot
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -24,22 +22,27 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install John the Ripper
+      - name: Install John the Ripper Jumbo dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y john
-          john --list=build-info | head -3 || true
+          sudo apt-get install -y build-essential libssl-dev zlib1g-dev yasm pkg-config libgmp-dev libpcap-dev libbz2-dev git
+
+      - name: Build and install John the Ripper Jumbo
+        run: |
+          git clone --depth 1 https://github.com/openwall/john.git -b bleeding-jumbo $HOME/john-src
+          cd $HOME/john-src/src
+          ./configure
+          make -s clean
+          make -sj$(nproc)
+          sudo mkdir -p /opt/john/run
+          sudo cp -r ../run/* /opt/john/run/
+          echo "/opt/john/run" >> $GITHUB_PATH
 
       - name: Install rockyou wordlist
         run: |
           sudo mkdir -p /usr/share/wordlists
-          if [ ! -f /usr/share/wordlists/rockyou.txt ]; then
-            sudo apt-get install -y wordlists || true
-            if [ -f /usr/share/wordlists/rockyou.txt.gz ]; then
-              sudo gunzip -f /usr/share/wordlists/rockyou.txt.gz
-            fi
-          fi
-          ls -la /usr/share/wordlists/ || true
+          sudo wget -q https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt -O /usr/share/wordlists/rockyou.txt
+          ls -la /usr/share/wordlists/
 
       - name: Install dependencies
         run: pip install -r requirements.txt

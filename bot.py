@@ -8,7 +8,7 @@ from database import init_db
 from rate_limiter import SimpleRateLimiter
 from handlers import (
     cmd_start, cmd_help, cmd_echo, cmd_stats, cmd_status,
-    cmd_broadcast, cmd_crack, cmd_johninfo, cmd_testwordlist,
+    cmd_broadcast, cmd_crack, cmd_crackf, cmd_johninfo, cmd_testwordlist,
     handle_message, error_handler,
 )
 
@@ -47,6 +47,7 @@ def main():
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("broadcast", cmd_broadcast))
     application.add_handler(CommandHandler("crack", cmd_crack))
+    application.add_handler(CommandHandler("crackf", cmd_crackf))
     application.add_handler(CommandHandler("johninfo", cmd_johninfo))
     application.add_handler(CommandHandler("testwordlist", cmd_testwordlist))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

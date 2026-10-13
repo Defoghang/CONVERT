@@ -12,6 +12,7 @@ from john_service import (
     cleanup_workdir,
     get_john_version,
     is_john_available,
+    find_john_binary,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status - Etat du bot (admin)\n"
         "/broadcast <message> - Diffuser un message (admin)\n"
         "/crack <hash> - Crack un hash avec John the Ripper (admin)\n"
+        "/crackf <format> <hash> - Crack avec format explicite (admin)\n"
         "/johninfo - Version de John the Ripper (admin)\n"
         "/testwordlist - Verifier la wordlist (admin)"
     )
@@ -63,12 +65,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or user.id not in ADMIN_IDS:
         await update.message.reply_text("Acces refuse.")
         return
-    john_status = "OK" if is_john_available() else "INDISPONIBLE"
+    binary = find_john_binary()
+    john_status = f"OK ({binary})" if binary else "INDISPONIBLE"
+    wordlist_status = "OK" if os.path.isfile(WORDLIST_PATH) else "ABSENTE"
     await update.message.reply_text(
         f"Bot en ligne.\n"
         f"Base de donnees : OK\n"
         f"Rate limiter : actif\n"
-        f"John the Ripper : {john_status}"
+        f"John the Ripper : {john_status}\n"
+        f"Wordlist rockyou : {wordlist_status}"
     )
 
 
@@ -92,7 +97,10 @@ async def cmd_johninfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("John the Ripper n'est pas installe.")
         return
     version = get_john_version()
-    await update.message.reply_text(f"John the Ripper :\n{version}")
+    binary = find_john_binary()
+    await update.message.reply_text(
+        f"John the Ripper :\n{version}\n\nBinaire : {binary}"
+    )
 
 
 async def cmd_testwordlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,7 +130,7 @@ async def cmd_crack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Usage : /crack <hash1> [hash2] ...\n"
             "Exemple : /crack 5f4dcc3b5aa765d61d8327deb882cf99\n"
-            "Formats supportes : md5, sha1, sha256, bcrypt, sha512crypt, etc."
+            "Pour un format specifique : /crackf <format> <hash>"
         )
         return
 
@@ -156,6 +164,61 @@ async def cmd_crack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"{h} -> {pwd}")
         else:
             lines.append("Aucun mot de passe trouve avec la wordlist actuelle.")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:4000] + "\n...(tronque)"
+        await update.message.reply_text(text)
+    finally:
+        if result:
+            cleanup_workdir(result["workdir"])
+
+
+async def cmd_crackf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or user.id not in ADMIN_IDS:
+        await update.message.reply_text("Acces refuse.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage : /crackf <format> <hash1> [hash2] ...\n"
+            "Exemples de formats : raw-md5, raw-sha1, raw-sha256, bcrypt, sha512crypt\n"
+            "Exemple : /crackf raw-md5 5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+        return
+
+    john_format = context.args[0].strip()
+    raw = " ".join(context.args[1:])
+
+    try:
+        hashes = validate_hashes(raw)
+    except JohnError as exc:
+        await update.message.reply_text(f"Erreur de validation : {exc}")
+        return
+
+    await update.message.reply_text(
+        f"Analyse de {len(hashes)} hash(es) au format {john_format}..."
+    )
+
+    result = None
+    try:
+        result = crack_hashes(hashes, wordlist=WORDLIST_PATH, john_format=john_format)
+    except JohnError as exc:
+        await update.message.reply_text(f"Erreur John : {exc}")
+        return
+
+    try:
+        lines = []
+        lines.append(f"Resultat de session {result['session_id']}")
+        lines.append(f"Format : {john_format}")
+        lines.append(f"Hashes traites : {result['total']}")
+        lines.append(f"Hashes cracks : {result['cracked_count']}")
+        lines.append("")
+        if result["cracked"]:
+            for h, pwd in result["cracked"].items():
+                lines.append(f"{h} -> {pwd}")
+        else:
+            lines.append("Aucun mot de passe trouve.")
         text = "\n".join(lines)
         if len(text) > 4000:
             text = text[:4000] + "\n...(tronque)"

@@ -5,14 +5,32 @@ import tempfile
 import uuid
 
 
-JOHN_BINARY = shutil.which("john") or "/usr/sbin/john"
+JOHN_BINARY_CANDIDATES = [
+    "/opt/john/run/john",
+    "/usr/sbin/john",
+    "/usr/bin/john",
+]
+
 JOHN_MAX_HASHES = 20
 JOHN_MAX_HASH_LENGTH = 512
-JOHN_TIMEOUT_SECONDS = 300
+JOHN_TIMEOUT_SECONDS = 600
 
 
 class JohnError(Exception):
     pass
+
+
+def find_john_binary():
+    for candidate in JOHN_BINARY_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    found = shutil.which("john")
+    if found:
+        return found
+    return None
+
+
+JOHN_BINARY = find_john_binary()
 
 
 def _sanitize_hash_line(line):
@@ -43,7 +61,8 @@ def validate_hashes(raw_text):
 
 
 def is_john_available():
-    return os.path.isfile(JOHN_BINARY) and os.access(JOHN_BINARY, os.X_OK)
+    binary = find_john_binary()
+    return binary is not None
 
 
 def _run_command(args, timeout=JOHN_TIMEOUT_SECONDS):
@@ -65,7 +84,8 @@ def _run_command(args, timeout=JOHN_TIMEOUT_SECONDS):
 
 
 def crack_hashes(hashes, wordlist=None, john_format=None):
-    if not is_john_available():
+    binary = find_john_binary()
+    if not binary:
         raise JohnError("John the Ripper n'est pas installe sur cet environnement")
 
     session_id = uuid.uuid4().hex[:12]
@@ -76,21 +96,17 @@ def crack_hashes(hashes, wordlist=None, john_format=None):
     with open(hash_file, "w", encoding="utf-8") as fh:
         fh.write("\n".join(hashes) + "\n")
 
-    base_args = [JOHN_BINARY, f"--pot={pot_file}", f"--session={session_id}"]
-
+    base_args = [binary, f"--pot={pot_file}", f"--session={session_id}"]
     if john_format:
         base_args.append(f"--format={john_format}")
-
-    if wordlist:
-        if not os.path.isfile(wordlist):
-            raise JohnError(f"Wordlist introuvable : {wordlist}")
+    if wordlist and os.path.isfile(wordlist):
         base_args.append(f"--wordlist={wordlist}")
-
+        base_args.append("--rules=Jumbo")
     base_args.append(hash_file)
 
     crack_result = _run_command(base_args)
 
-    show_args = [JOHN_BINARY, f"--pot={pot_file}", "--show", hash_file]
+    show_args = [binary, f"--pot={pot_file}", "--show", hash_file]
     if john_format:
         show_args.insert(2, f"--format={john_format}")
 
@@ -100,9 +116,11 @@ def crack_hashes(hashes, wordlist=None, john_format=None):
     for line in show_result.stdout.splitlines():
         if ":" not in line:
             continue
-        if line.strip().endswith("password hash cracked, 0 left"):
+        if "password hash cracked" in line:
             continue
         if line.startswith("0g"):
+            continue
+        if line.strip().endswith(" left"):
             continue
         parts = line.split(":", 1)
         if len(parts) == 2:
@@ -128,12 +146,16 @@ def cleanup_workdir(workdir):
 
 
 def get_john_version():
-    if not is_john_available():
+    binary = find_john_binary()
+    if not binary:
         return None
-    result = _run_command([JOHN_BINARY, "--list=build-info"], timeout=10)
+    result = _run_command([binary, "--list=build-info"], timeout=15)
     if result.returncode != 0:
         return "Version inconnue"
     for line in result.stdout.splitlines():
         if line.startswith("John the Ripper"):
+            return line.strip()
+    for line in result.stdout.splitlines():
+        if line.strip():
             return line.strip()
     return "Version inconnue"
