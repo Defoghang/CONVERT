@@ -29,7 +29,7 @@ jobs:
             build-essential libssl-dev zlib1g-dev yasm pkg-config libgmp-dev libpcap-dev libbz2-dev git \
             hashcat pdfcrack poppler-utils unrar-free p7zip-full cabextract \
             steghide binwalk foremost testdisk sleuthkit file binutils \
-            qpdf
+            qpdf hydra libidn11-dev libssh-dev libpg-dev libgcrypt20-dev freerdp2-dev
 
       - name: Install stegseek
         run: |
@@ -52,6 +52,7 @@ jobs:
           sudo mkdir -p /usr/share/wordlists
           sudo wget -q https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt -O /usr/share/wordlists/rockyou.txt
           ls -la /usr/share/wordlists/
+          hydra -h | head -3 || true
 
       - name: Install Python dependencies
         run: |

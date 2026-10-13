@@ -35,6 +35,15 @@ from pdf_service import (
     find_pdf2john,
     is_qpdf_available,
 )
+from hydra_service import (
+    HydraError,
+    hydra_attack,
+    cleanup_workdir as hydra_cleanup,
+    is_hydra_available,
+    get_hydra_version,
+    list_supported_protocols,
+)
+
 from extra_tools_service import (
     ExtraToolError,
     available_tools,
@@ -138,6 +147,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/binwalk - signature scan (repondre a un fichier)\n"
         "/strings - extraire les chaines (repondre a un fichier)\n"
         "/tool7z - extraire une archive (repondre a un fichier)\n\n"
+        "Hydra (force brute en ligne) :\n"
+        "/hydra <proto> <cible> <user> <pass> [port]\n"
+        "/hydrawordlist <proto> <cible> <user> [port] - rockyou\n"
+        "/hydraprotocols - lister les protocoles\n"
+        "/hydrainfo - version Hydra\n\n"
         "OSINT et decoding :\n"
         "/harvest <domaine>\n"
         "/decode <texte>\n\n"
@@ -1076,6 +1090,125 @@ async def handle_document(update, context):
         "- /extract <type> : extraire hash *2john\n"
         "- PDFs : traitement automatique"
     )
+
+
+
+async def cmd_hydra(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    if not is_hydra_available():
+        await update.message.reply_text("Hydra indisponible.")
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage : /hydra <protocole> <cible> <user> <pass> [port]\n"
+            "Exemple : /hydra ssh 192.168.1.10 root toor 22\n"
+            "Exemple : /hydra ftp 10.0.0.5 admin password\n\n"
+            "Protocoles autorises : /hydraprotocols"
+        )
+        return
+    protocol = context.args[0].strip()
+    host = context.args[1].strip()
+    username = context.args[2].strip()
+    password = context.args[3].strip() if len(context.args) > 3 else None
+    port = context.args[4].strip() if len(context.args) > 4 else None
+    if not password:
+        await update.message.reply_text("Mot de passe manquant.")
+        return
+    status = await update.message.reply_text(
+        f"Hydra en cours sur {protocol}://{host}..."
+    )
+    result = None
+    try:
+        result = hydra_attack(
+            host=host, protocol=protocol,
+            username=username, password=password, port=port,
+        )
+        if result["found"]:
+            text = "Identifiants trouves :\n"
+            for line in result["found"]:
+                text += f"- {line}\n"
+            await status.edit_text(_truncate(text))
+        else:
+            await status.edit_text(
+                "Aucun identifiant valide trouve.\n\n"
+                f"Cible : {result['target']}\n"
+                f"Code retour : {result['returncode']}"
+            )
+    except HydraError as exc:
+        await status.edit_text(f"Erreur Hydra : {exc}")
+    finally:
+        if result:
+            hydra_cleanup(result["workdir"])
+
+
+async def cmd_hydrawordlist(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    if not _is_hydra_available():
+        await update.message.reply_text("Hydra indisponible.")
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage : /hydrawordlist <protocole> <cible> <user> [port]\n"
+            "Utilise rockyou.txt comme passlist automatiquement."
+        )
+        return
+    protocol = context.args[0].strip()
+    host = context.args[1].strip()
+    username = context.args[2].strip()
+    port = context.args[3].strip() if len(context.args) > 3 else None
+    if not os.path.isfile(WORDLIST_PATH):
+        await update.message.reply_text("rockyou.txt absente.")
+        return
+    status = await update.message.reply_text(
+        f"Hydra + rockyou sur {protocol}://{host}...\n"
+        "(peut prendre plusieurs minutes)"
+    )
+    result = None
+    try:
+        result = hydra_attack(
+            host=host, protocol=protocol, username=username,
+            passlist=WORDLIST_PATH, port=port, tasks=4, stop_on_first=True,
+        )
+        if result["found"]:
+            text = "Identifiants trouves :\n"
+            for line in result["found"]:
+                text += f"- {line}\n"
+            await status.edit_text(_truncate(text))
+        else:
+            await status.edit_text(
+                "Aucun mot de passe de rockyou n'a fonctionne.\n"
+                f"Cible : {result['target']}"
+            )
+    except HydraError as exc:
+        await status.edit_text(f"Erreur Hydra : {exc}")
+    finally:
+        if result:
+            hydra_cleanup(result["workdir"])
+
+
+async def cmd_hydraprotocols(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    protocols = list_supported_protocols()
+    await update.message.reply_text(
+        f"Protocoles autorises ({len(protocols)}) :\n\n" + "\n".join(protocols)
+    )
+
+
+async def cmd_hydrainfo(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    if not is_hydra_available():
+        await update.message.reply_text("Hydra indisponible.")
+        return
+    version = get_hydra_version()
+    await update.message.reply_text(f"Hydra :\n{version}")
 
 
 async def error_handler(update, context):

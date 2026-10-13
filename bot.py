@@ -15,6 +15,7 @@ from handlers import (
     cmd_pdfcrackcmd, cmd_tools, cmd_hdetect, cmd_hcrack, cmd_hcrackm,
     cmd_binwalk, cmd_strings, cmd_tool7z, cmd_steginfo, cmd_stegcrack,
     cmd_decode, cmd_harvest,
+    cmd_hydra, cmd_hydrawordlist, cmd_hydraprotocols, cmd_hydrainfo,
     handle_message, handle_document, error_handler,
 )
 
@@ -62,6 +63,8 @@ def main():
         ("binwalk", cmd_binwalk), ("strings", cmd_strings), ("tool7z", cmd_tool7z),
         ("steginfo", cmd_steginfo), ("stegcrack", cmd_stegcrack),
         ("decode", cmd_decode), ("harvest", cmd_harvest),
+        ("hydra", cmd_hydra), ("hydrawordlist", cmd_hydrawordlist),
+        ("hydraprotocols", cmd_hydraprotocols), ("hydrainfo", cmd_hydrainfo),
         ("broadcast", cmd_broadcast),
     ]
     for name, fn in commands:
