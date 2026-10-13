@@ -8,8 +8,11 @@ from database import init_db
 from rate_limiter import SimpleRateLimiter
 from handlers import (
     cmd_start, cmd_help, cmd_echo, cmd_stats, cmd_status,
-    cmd_broadcast, cmd_crack, cmd_crackf, cmd_johninfo, cmd_testwordlist,
-    handle_message, error_handler,
+    cmd_broadcast, cmd_crack, cmd_crackf, cmd_crackrules,
+    cmd_crackmask, cmd_crackhybrid, cmd_crackinc, cmd_crackincm,
+    cmd_cracksingle, cmd_johninfo, cmd_wordlist, cmd_formats,
+    cmd_rules, cmd_extractors, cmd_extract,
+    handle_message, handle_document, error_handler,
 )
 
 
@@ -45,11 +48,22 @@ def main():
     application.add_handler(CommandHandler("echo", cmd_echo))
     application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    application.add_handler(CommandHandler("johninfo", cmd_johninfo))
+    application.add_handler(CommandHandler("wordlist", cmd_wordlist))
+    application.add_handler(CommandHandler("formats", cmd_formats))
+    application.add_handler(CommandHandler("rules", cmd_rules))
+    application.add_handler(CommandHandler("extractors", cmd_extractors))
+    application.add_handler(CommandHandler("extract", cmd_extract))
     application.add_handler(CommandHandler("crack", cmd_crack))
     application.add_handler(CommandHandler("crackf", cmd_crackf))
-    application.add_handler(CommandHandler("johninfo", cmd_johninfo))
-    application.add_handler(CommandHandler("testwordlist", cmd_testwordlist))
+    application.add_handler(CommandHandler("crackrules", cmd_crackrules))
+    application.add_handler(CommandHandler("crackmask", cmd_crackmask))
+    application.add_handler(CommandHandler("crackhybrid", cmd_crackhybrid))
+    application.add_handler(CommandHandler("crackinc", cmd_crackinc))
+    application.add_handler(CommandHandler("crackincm", cmd_crackincm))
+    application.add_handler(CommandHandler("cracksingle", cmd_cracksingle))
+    application.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
 
