@@ -1,9 +1,9 @@
 name: Run Telegram Bot
 
 on:
+  schedule:
+    - cron: '0 */6 * * *'
   workflow_dispatch:
-  repository_dispatch:
-    types: [restart-bot]
 
 concurrency:
   group: telegram-bot-runner
@@ -51,10 +51,3 @@ jobs:
           DATABASE_PATH: ${{ github.workspace }}/bot_data.db
           LOG_LEVEL: INFO
         run: python bot.py
-
-      - name: Restart workflow
-        if: always() && !cancelled()
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GH_PAT }}
-          event-type: restart-bot
