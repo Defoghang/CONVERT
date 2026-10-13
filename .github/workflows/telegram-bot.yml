@@ -1,0 +1,39 @@
+name: Run Telegram Bot
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [restart-bot]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+          DATABASE_PATH: ${{ github.workspace }}/bot_data.db
+          LOG_LEVEL: INFO
+        run: python bot.py
+
+      - name: Restart workflow
+        if: always()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          event-type: restart-bot
