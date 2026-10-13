@@ -80,6 +80,16 @@ def _sanitize_filename(name):
     return name[:120] or "document.pdf"
 
 
+def _is_pdf_document(doc):
+    if not doc:
+        return False
+    if doc.mime_type and doc.mime_type == "application/pdf":
+        return True
+    if doc.file_name and doc.file_name.lower().endswith(".pdf"):
+        return True
+    return False
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user:
@@ -99,9 +109,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Afficher cette aide\n"
         "/echo <texte> - Repeter un texte\n"
         "/stats - Afficher les statistiques\n\n"
-        "PDF - cassage et deverrouillage :\n"
-        "/pdfcrack - Reponds a un PDF chiffre avec cette commande\n"
-        "/pdfinfo - Verifie la disponibilite de pdf2john et qpdf\n\n"
+        "PDF - cassage et deverrouillage automatique :\n"
+        "Envoie simplement un PDF au bot, il le casse et te renvoie\n"
+        "la version deverrouillee.\n"
+        "/pdfinfo - Verifie pdf2john et qpdf\n\n"
         "Commandes admin - John the Ripper :\n"
         "/status - Etat du bot et des outils\n"
         "/johninfo - Version de John\n"
@@ -121,7 +132,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cracksingle <hash> - Mode single\n\n"
         "Extraction de hash depuis fichiers :\n"
         "/extractors - Lister les extracteurs disponibles\n"
-        "/extract <type> - Extraire depuis un fichier envoye"
+        "Envoie un fichier avec la legende /extract <type> pour extraire"
     )
     await update.message.reply_text(text)
 
@@ -458,57 +469,8 @@ async def cmd_extractors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not extractors:
         await update.message.reply_text("Aucun extracteur disponible.")
         return
-    text = f"Extracteurs disponibles ({len(extractors)}) :\n\n" + "\n".join(
-        f"/extract {name}" for name in extractors
-    )
+    text = f"Extracteurs disponibles ({len(extractors)}) :\n\n" + "\n".join(extractors)
     await update.message.reply_text(_truncate(text))
-
-
-async def cmd_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        await update.message.reply_text("Acces refuse.")
-        return
-    if not context.args:
-        await update.message.reply_text("Usage : /extract <type> (avec un fichier joint)")
-        return
-    extractor_name = context.args[0].strip()
-    if not FORMAT_RE.match(extractor_name):
-        await update.message.reply_text("Nom d'extracteur invalide.")
-        return
-    target_doc = None
-    if update.message.document:
-        target_doc = update.message.document
-    elif update.message.reply_to_message and update.message.reply_to_message.document:
-        target_doc = update.message.reply_to_message.document
-    if not target_doc:
-        await update.message.reply_text("Aucun document detecte.")
-        return
-    if target_doc.file_size and target_doc.file_size > 50 * 1024 * 1024:
-        await update.message.reply_text("Fichier trop volumineux (max 50 Mo).")
-        return
-    status_msg = await update.message.reply_text(f"Telechargement pour {extractor_name}...")
-    tmpdir = None
-    try:
-        tg_file = await target_doc.get_file()
-        tmpdir = os.path.join("/tmp", f"extract_{target_doc.file_unique_id}")
-        os.makedirs(tmpdir, exist_ok=True)
-        file_path = os.path.join(tmpdir, _sanitize_filename(target_doc.file_name) or "input.bin")
-        await tg_file.download_to_drive(file_path)
-        await status_msg.edit_text(f"Extraction avec {extractor_name}...")
-        result = extract_hash_from_file(file_path, extractor_name)
-        text = (
-            f"Extraction reussie.\n"
-            f"Extracteur : {result['extractor']}\n"
-            f"Taille : {result['file_size']} octets\n\n"
-            f"Hash extrait :\n{result['hash_line']}\n\n"
-            f"Pour casser : /crack <hash>"
-        )
-        await status_msg.edit_text(_truncate(text))
-    except JohnError as exc:
-        await status_msg.edit_text(f"Erreur : {exc}")
-    finally:
-        if tmpdir and os.path.isdir(tmpdir):
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 async def cmd_pdfinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -524,30 +486,13 @@ async def cmd_pdfinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        await update.message.reply_text("Acces refuse.")
-        return
-
-    target_doc = None
-    if update.message.document:
-        target_doc = update.message.document
-    elif update.message.reply_to_message and update.message.reply_to_message.document:
-        target_doc = update.message.reply_to_message.document
-
-    if not target_doc:
-        await update.message.reply_text(
-            "Envoie un PDF en piece jointe avec la legende /pdfcrack,\n"
-            "ou reponds a un PDF deja envoye avec /pdfcrack."
-        )
-        return
-
+async def _process_pdf_crack(update, target_doc):
     file_name = _sanitize_filename(target_doc.file_name or "document.pdf")
-    if not file_name.lower().endswith(".pdf"):
-        await update.message.reply_text("Le fichier doit etre un PDF.")
+    if not _is_pdf_document(target_doc):
+        await update.message.reply_text("Le fichier envoye n'est pas un PDF.")
         return
     if target_doc.file_size and target_doc.file_size > PDF_MAX_FILE_SIZE:
-        await update.message.reply_text(f"PDF trop volumineux (max 20 Mo).")
+        await update.message.reply_text("PDF trop volumineux (max 20 Mo).")
         return
     if not find_pdf2john():
         await update.message.reply_text("pdf2john indisponible sur cet environnement.")
@@ -560,7 +505,9 @@ async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     session_id, workdir = make_session_dir()
-    status_msg = await update.message.reply_text("Telechargement du PDF...")
+    status_msg = await update.message.reply_text(
+        f"PDF recu : {file_name}\nTelechargement en cours..."
+    )
 
     try:
         tg_file = await target_doc.get_file()
@@ -581,10 +528,8 @@ async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         hash_line = extracted["hash_line"]
-        short_hash = hash_line.split(":")[-1][:80]
         await status_msg.edit_text(
-            f"Hash extrait :\n{short_hash}...\n\n"
-            f"Cassage en cours avec rockyou + regles Jumbo..."
+            "Hash PDF extrait.\nCassage en cours avec rockyou + regles Jumbo..."
         )
 
         crack_result = None
@@ -598,14 +543,16 @@ async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not crack_result["cracked"]:
                 await status_msg.edit_text(
                     "Aucun mot de passe trouve avec rockyou.\n"
-                    "Le mot de passe est probablement trop complexe pour cette wordlist."
+                    "Le mot de passe est probablement trop complexe pour cette wordlist.\n\n"
+                    "Tu peux essayer manuellement :\n"
+                    "/crackmask ?d?d?d?d <hash>\n"
+                    "/crackinc <hash>"
                 )
                 return
 
             password = next(iter(crack_result["cracked"].values()))
             await status_msg.edit_text(
-                f"Mot de passe trouve : {password}\n"
-                f"Deverrouillage du PDF avec qpdf..."
+                f"Mot de passe trouve : {password}\nDeverrouillage en cours..."
             )
 
             unlocked_path = os.path.join(workdir, "unlocked_" + file_name)
@@ -613,7 +560,7 @@ async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 decrypt_pdf(pdf_path, password, unlocked_path)
             except PdfError as exc:
                 await status_msg.edit_text(
-                    f"Mot de passe trouve ({password}) mais echec de deverrouillage :\n{exc}"
+                    f"Mot de passe trouve ({password}) mais echec du deverrouillage :\n{exc}"
                 )
                 return
 
@@ -625,13 +572,34 @@ async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"Mot de passe : {password}",
                 )
             await status_msg.edit_text(
-                f"PDF deverrouille et envoye.\nMot de passe : {password}"
+                f"PDF deverrouille envoye.\nMot de passe : {password}"
             )
         finally:
             if crack_result:
                 cleanup_workdir(crack_result["workdir"])
     finally:
         cleanup_dir(workdir)
+
+
+async def cmd_pdfcrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+
+    target_doc = None
+    if update.message.document:
+        target_doc = update.message.document
+    elif update.message.reply_to_message and update.message.reply_to_message.document:
+        target_doc = update.message.reply_to_message.document
+
+    if not target_doc:
+        await update.message.reply_text(
+            "Envoie simplement un PDF au bot (sans commande), il sera traite automatiquement.\n"
+            "Ou reponds a un PDF avec /pdfcrack."
+        )
+        return
+
+    await _process_pdf_crack(update, target_doc)
 
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -654,22 +622,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        return
     if not update.message or not update.message.document:
         return
-    caption = update.message.caption or ""
-    parts = caption.split()
-    if not parts:
+
+    doc = update.message.document
+    caption = (update.message.caption or "").strip()
+    parts = caption.split() if caption else []
+    command = parts[0].split("@")[0] if parts else ""
+
+    if not _is_admin(update):
+        if command == "/extract" or _is_pdf_document(doc):
+            await update.message.reply_text("Acces refuse.")
         return
-    command = parts[0].split("@")[0]
-    if command == "/pdfcrack":
-        await cmd_pdfcrack(update, context)
-        return
+
     if command == "/extract" and len(parts) >= 2:
-        context.args = parts[1:]
-        await cmd_extract(update, context)
+        extractor_name = parts[1].strip()
+        if not FORMAT_RE.match(extractor_name):
+            await update.message.reply_text("Nom d'extracteur invalide.")
+            return
+        if doc.file_size and doc.file_size > 50 * 1024 * 1024:
+            await update.message.reply_text("Fichier trop volumineux (max 50 Mo).")
+            return
+        status_msg = await update.message.reply_text(f"Extraction avec {extractor_name}...")
+        tmpdir = None
+        try:
+            tg_file = await doc.get_file()
+            tmpdir = os.path.join("/tmp", f"extract_{doc.file_unique_id}")
+            os.makedirs(tmpdir, exist_ok=True)
+            file_path = os.path.join(tmpdir, _sanitize_filename(doc.file_name) or "input.bin")
+            await tg_file.download_to_drive(file_path)
+            result = extract_hash_from_file(file_path, extractor_name)
+            text = (
+                f"Extraction reussie.\n"
+                f"Extracteur : {result['extractor']}\n"
+                f"Hash extrait :\n{result['hash_line']}"
+            )
+            await status_msg.edit_text(_truncate(text))
+        except JohnError as exc:
+            await status_msg.edit_text(f"Erreur : {exc}")
+        finally:
+            if tmpdir and os.path.isdir(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)
         return
+
+    if _is_pdf_document(doc):
+        await _process_pdf_crack(update, doc)
+        return
+
+    await update.message.reply_text(
+        "Document recu. Pour extraire un hash, renvoie-le avec la legende :\n"
+        "/extract <type>  (ex: /extract zip2john)\n\n"
+        "Pour les PDF, envoie simplement le fichier, il sera traite automatiquement."
+    )
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
