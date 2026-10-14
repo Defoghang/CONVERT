@@ -16,6 +16,7 @@ from handlers import (
     cmd_binwalk, cmd_strings, cmd_tool7z, cmd_steginfo, cmd_stegcrack,
     cmd_decode, cmd_harvest,
     cmd_hydra, cmd_hydrawordlist, cmd_hydraprotocols, cmd_hydrainfo,
+    cmd_decompile, cmd_jadxinfo,
     handle_message, handle_document, error_handler,
 )
 
@@ -65,6 +66,7 @@ def main():
         ("decode", cmd_decode), ("harvest", cmd_harvest),
         ("hydra", cmd_hydra), ("hydrawordlist", cmd_hydrawordlist),
         ("hydraprotocols", cmd_hydraprotocols), ("hydrainfo", cmd_hydrainfo),
+        ("decompile", cmd_decompile), ("jadxinfo", cmd_jadxinfo),
         ("broadcast", cmd_broadcast),
     ]
     for name, fn in commands:

@@ -35,6 +35,16 @@ from pdf_service import (
     find_pdf2john,
     is_qpdf_available,
 )
+from jadx_service import (
+    JadxError,
+    decompile as jadx_decompile,
+    pack_sources,
+    is_jadx_available,
+    get_jadx_version,
+    cleanup_dir as jadx_cleanup,
+    SUPPORTED_EXTENSIONS,
+)
+
 from hydra_service import (
     HydraError,
     hydra_attack,
@@ -152,6 +162,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/hydrawordlist <proto> <cible> <user> [port] - rockyou\n"
         "/hydraprotocols - lister les protocoles\n"
         "/hydrainfo - version Hydra\n\n"
+        "Decompilation DEX/APK -> Java (JADX) :\n"
+        "/decompile - reponds a un APK/DEX/JAR (admin)\n"
+        "/jadxinfo - version JADX (admin)\n\n"
         "OSINT et decoding :\n"
         "/harvest <domaine>\n"
         "/decode <texte>\n\n"
@@ -1209,6 +1222,107 @@ async def cmd_hydrainfo(update, context):
         return
     version = get_hydra_version()
     await update.message.reply_text(f"Hydra :\n{version}")
+
+
+
+def _is_dex_document(doc):
+    if not doc:
+        return False
+    name = (doc.file_name or "").lower()
+    return name.endswith(SUPPORTED_EXTENSIONS)
+
+
+async def cmd_jadxinfo(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    if not is_jadx_available():
+        await update.message.reply_text("JADX indisponible.")
+        return
+    version = get_jadx_version()
+    await update.message.reply_text(f"JADX :\n{version}")
+
+
+async def cmd_decompile(update, context):
+    if not _is_admin(update):
+        await update.message.reply_text("Acces refuse.")
+        return
+    if not is_jadx_available():
+        await update.message.reply_text("JADX indisponible.")
+        return
+
+    doc = None
+    if update.message.document:
+        doc = update.message.document
+    elif update.message.reply_to_message and update.message.reply_to_message.document:
+        doc = update.message.reply_to_message.document
+
+    if not doc:
+        await update.message.reply_text(
+            "Envoie un APK, DEX, JAR, AAR ou CLASS avec la legende /decompile,\n"
+            "ou reponds a un fichier deja envoye avec /decompile."
+        )
+        return
+
+    name = (doc.file_name or "").lower()
+    if not name.endswith(SUPPORTED_EXTENSIONS):
+        await update.message.reply_text(
+            f"Extension non supportee. Autorisees : {', '.join(SUPPORTED_EXTENSIONS)}"
+        )
+        return
+
+    if doc.file_size and doc.file_size > 50 * 1024 * 1024:
+        await update.message.reply_text("Fichier trop volumineux (max 50 Mo).")
+        return
+
+    workdir = "/tmp/jadx_" + doc.file_unique_id
+    os.makedirs(workdir, exist_ok=True)
+    status = await update.message.reply_text("Telechargement du fichier...")
+
+    try:
+        tg_file = await doc.get_file()
+        input_path = os.path.join(workdir, _sanitize_filename(doc.file_name or "input.apk"))
+        await tg_file.download_to_drive(input_path)
+
+        size_mb = os.path.getsize(input_path) / (1024 * 1024)
+        await status.edit_text(f"Decompilation en cours ({size_mb:.1f} Mo)...")
+
+        result = jadx_decompile(input_path, workdir)
+
+        await status.edit_text(
+            f"Decompilation terminee.\n"
+            f"Type : {result['kind']}\n"
+            f"Fichiers Java : {result['java_count']}\n"
+            f"Fichiers totaux : {result['files_count']}\n"
+            f"Taille totale : {result['total_bytes'] // 1024} Ko\n\n"
+            "Preparation de l'archive..."
+        )
+
+        archive_path, archive_size = pack_sources(result["sources_dir"], workdir)
+        size_disp = archive_size / (1024 * 1024)
+        await status.edit_text(f"Envoi de l'archive ({size_disp:.1f} Mo)...")
+
+        base_name = os.path.splitext(_sanitize_filename(doc.file_name or "input"))[0]
+        archive_name = f"{base_name}_java.zip"
+
+        with open(archive_path, "rb") as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename=archive_name,
+                caption=(
+                    f"Code Java decompile ({result['java_count']} fichiers .java)\n"
+                    f"Source : {doc.file_name}"
+                ),
+            )
+        await status.edit_text(
+            f"Termine. {result['java_count']} fichiers Java envoyes dans {archive_name}"
+        )
+    except JadxError as exc:
+        await status.edit_text(f"Erreur JADX : {exc}")
+    except Exception as exc:
+        await status.edit_text(f"Erreur : {exc}")
+    finally:
+        jadx_cleanup(workdir)
 
 
 async def error_handler(update, context):
