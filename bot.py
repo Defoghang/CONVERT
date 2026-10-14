@@ -7,16 +7,8 @@ from config import TELEGRAM_BOT_TOKEN, LOG_LEVEL
 from database import init_db
 from rate_limiter import SimpleRateLimiter
 from handlers import (
-    cmd_start, cmd_help, cmd_echo, cmd_stats, cmd_status,
-    cmd_broadcast, cmd_crack, cmd_crackf, cmd_crackrules,
-    cmd_crackmask, cmd_crackhybrid, cmd_crackinc, cmd_crackincm,
-    cmd_cracksingle, cmd_johninfo, cmd_wordlist, cmd_formats,
-    cmd_rules, cmd_extractors, cmd_pdfinfo, cmd_pdfcrack, cmd_pdfanalyze,
-    cmd_pdfcrackcmd, cmd_tools, cmd_hdetect, cmd_hcrack, cmd_hcrackm,
-    cmd_binwalk, cmd_strings, cmd_tool7z, cmd_steginfo, cmd_stegcrack,
-    cmd_decode, cmd_harvest,
-    cmd_hydra, cmd_hydrawordlist, cmd_hydraprotocols, cmd_hydrainfo,
-    cmd_decompile, cmd_jadxinfo,
+    cmd_start, cmd_help,
+    cmd_analyze, cmd_sastinfo,
     handle_message, handle_document, error_handler,
 )
 
@@ -48,35 +40,15 @@ def main():
         .build()
     )
 
-    commands = [
-        ("start", cmd_start), ("help", cmd_help), ("echo", cmd_echo),
-        ("stats", cmd_stats), ("status", cmd_status), ("tools", cmd_tools),
-        ("johninfo", cmd_johninfo), ("wordlist", cmd_wordlist),
-        ("formats", cmd_formats), ("rules", cmd_rules),
-        ("extractors", cmd_extractors),
-        ("crack", cmd_crack), ("crackf", cmd_crackf),
-        ("crackrules", cmd_crackrules), ("crackmask", cmd_crackmask),
-        ("crackhybrid", cmd_crackhybrid), ("crackinc", cmd_crackinc),
-        ("crackincm", cmd_crackincm), ("cracksingle", cmd_cracksingle),
-        ("hdetect", cmd_hdetect), ("hcrack", cmd_hcrack), ("hcrackm", cmd_hcrackm),
-        ("pdfinfo", cmd_pdfinfo), ("pdfcrack", cmd_pdfcrack),
-        ("pdfanalyze", cmd_pdfanalyze), ("pdfcrackcmd", cmd_pdfcrackcmd),
-        ("binwalk", cmd_binwalk), ("strings", cmd_strings), ("tool7z", cmd_tool7z),
-        ("steginfo", cmd_steginfo), ("stegcrack", cmd_stegcrack),
-        ("decode", cmd_decode), ("harvest", cmd_harvest),
-        ("hydra", cmd_hydra), ("hydrawordlist", cmd_hydrawordlist),
-        ("hydraprotocols", cmd_hydraprotocols), ("hydrainfo", cmd_hydrainfo),
-        ("decompile", cmd_decompile), ("jadxinfo", cmd_jadxinfo),
-        ("broadcast", cmd_broadcast),
-    ]
-    for name, fn in commands:
-        application.add_handler(CommandHandler(name, fn))
-
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("sastinfo", cmd_sastinfo))
+    application.add_handler(CommandHandler("analyze", cmd_analyze))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
 
-    logger.info("Demarrage polling")
+    logger.info("Demarrage polling (SAST only)")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
