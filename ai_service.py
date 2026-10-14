@@ -52,6 +52,14 @@ def _call_groq(messages, temperature=0.1, max_tokens=4096):
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Origin": "https://console.groq.com",
+            "Referer": "https://console.groq.com/",
         },
         method="POST",
     )
