@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import uuid
 import zipfile
@@ -10,6 +11,22 @@ SAST_TIMEOUT = 600
 SAST_MAX_INPUT_SIZE = 50 * 1024 * 1024
 SAST_MAX_REPORT_SIZE = 5 * 1024 * 1024
 SAST_MAX_ZIP_SIZE = 45 * 1024 * 1024
+SAST_MAX_FILES = 500
+
+ARCHIVE_EXTENSIONS = (
+    ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
+    ".tar.xz", ".txz", ".gz", ".bz2", ".xz", ".rar", ".7z",
+)
+
+SOURCE_EXTENSIONS = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".kts",
+    ".go", ".rb", ".php", ".cs", ".c", ".cpp", ".cc", ".cxx",
+    ".h", ".hpp", ".rs", ".swift", ".sh", ".bash", ".zsh",
+    ".yml", ".yaml", ".sql", ".html", ".htm", ".xml", ".json",
+    ".pl", ".pm", ".lua", ".r", ".scala", ".m", ".mm",
+)
+
+SUPPORTED_EXTENSIONS = ARCHIVE_EXTENSIONS + SOURCE_EXTENSIONS
 
 
 class SastError(Exception):
@@ -67,21 +84,174 @@ def _run(args, timeout=SAST_TIMEOUT, cwd=None, env=None):
 
 def _detect_language(path):
     ext_map = {
-        ".py": "python", ".js": "javascript", ".ts": "typescript",
-        ".java": "java", ".kt": "kotlin", ".go": "go", ".rb": "ruby",
-        ".php": "php", ".cs": "csharp", ".c": "c", ".cpp": "cpp",
+        ".py": "python", ".js": "javascript", ".jsx": "javascript",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+        ".go": "go", ".rb": "ruby", ".php": "php", ".cs": "csharp",
+        ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
         ".h": "c", ".hpp": "cpp", ".rs": "rust", ".swift": "swift",
-        ".sh": "bash", ".bash": "bash", ".yml": "yaml", ".yaml": "yaml",
-        ".json": "json", ".xml": "xml", ".html": "html", ".sql": "sql",
+        ".sh": "bash", ".bash": "bash", ".zsh": "bash",
+        ".yml": "yaml", ".yaml": "yaml", ".json": "json",
+        ".xml": "xml", ".html": "html", ".htm": "html",
+        ".sql": "sql", ".pl": "perl", ".pm": "perl",
+        ".lua": "lua", ".r": "r", ".scala": "scala",
+        ".m": "objective-c", ".mm": "objective-c",
     }
     ext = os.path.splitext(path)[1].lower()
     return ext_map.get(ext)
 
 
-def _find_source_files(root, max_files=500):
+def _detect_kind(path):
+    name = path.lower()
+    if name.endswith(".zip"):
+        return "zip"
+    for suffix in (".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar"):
+        if name.endswith(suffix):
+            return "tar"
+    if name.endswith(".gz"):
+        return "gz"
+    if name.endswith(".bz2"):
+        return "bz2"
+    if name.endswith(".xz"):
+        return "xz"
+    if name.endswith(".rar"):
+        return "rar"
+    if name.endswith(".7z"):
+        return "7z"
+    return "file"
+
+
+def _is_safe_member(member):
+    if not member:
+        return False
+    if member.startswith("/") or member.startswith("\\"):
+        return False
+    parts = member.replace("\\", "/").split("/")
+    if ".." in parts:
+        return False
+    return True
+
+
+def _extract_zip(path, workdir):
+    with zipfile.ZipFile(path, "r") as zf:
+        for member in zf.namelist():
+            if not _is_safe_member(member):
+                continue
+            try:
+                zf.extract(member, workdir)
+            except (OSError, zipfile.BadZipFile):
+                continue
+
+
+def _extract_tar(path, workdir):
+    with tarfile.open(path, "r:*") as tf:
+        for member in tf.getmembers():
+            if not _is_safe_member(member.name):
+                continue
+            try:
+                tf.extract(member, workdir)
+            except (OSError, tarfile.TarError):
+                continue
+
+
+def _extract_with_command(cmd_list, workdir, tool_name):
+    if not cmd_list:
+        raise SastError(f"{tool_name} indisponible sur cet environnement")
+    result = _run(cmd_list, timeout=180, cwd=workdir)
+    if result.returncode not in (0, 1):
+        err = (result.stderr or result.stdout or "")[:200]
+        raise SastError(f"Extraction {tool_name} echouee : {err}")
+
+
+def _prepare_workdir(input_path):
+    workdir = tempfile.mkdtemp(prefix=f"sast_{uuid.uuid4().hex[:12]}_")
+
+    if os.path.isdir(input_path):
+        shutil.copytree(input_path, os.path.join(workdir, "src"))
+        return workdir
+
+    if not os.path.isfile(input_path):
+        raise SastError("Entree invalide")
+
+    kind = _detect_kind(input_path)
+    name = os.path.basename(input_path)
+
+    if kind == "zip":
+        _extract_zip(input_path, workdir)
+        return workdir
+
+    if kind == "tar":
+        _extract_tar(input_path, workdir)
+        return workdir
+
+    if kind in ("gz", "bz2", "xz"):
+        try:
+            _extract_tar(input_path, workdir)
+            return workdir
+        except (tarfile.TarError, OSError):
+            pass
+        if kind == "gz":
+            tool = shutil.which("gunzip")
+            if tool:
+                out_name = name[:-3] if name.lower().endswith(".gz") else name + ".out"
+                out_path = os.path.join(workdir, out_name)
+                _run([tool, "-c", input_path], timeout=120)
+                try:
+                    with open(input_path, "rb") as src:
+                        import gzip
+                        with gzip.open(src, "rb") as gz:
+                            with open(out_path, "wb") as dst:
+                                shutil.copyfileobj(gz, dst)
+                    return workdir
+                except OSError as exc:
+                    raise SastError(f"Decompression gz echouee : {exc}") from exc
+        if kind == "bz2":
+            import bz2
+            try:
+                out_name = name[:-4] if name.lower().endswith(".bz2") else name + ".out"
+                out_path = os.path.join(workdir, out_name)
+                with bz2.open(input_path, "rb") as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                return workdir
+            except OSError as exc:
+                raise SastError(f"Decompression bz2 echouee : {exc}") from exc
+        if kind == "xz":
+            import lzma
+            try:
+                out_name = name[:-3] if name.lower().endswith(".xz") else name + ".out"
+                out_path = os.path.join(workdir, out_name)
+                with lzma.open(input_path, "rb") as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                return workdir
+            except (OSError, lzma.LZMAError) as exc:
+                raise SastError(f"Decompression xz echouee : {exc}") from exc
+        raise SastError("Decompression impossible")
+
+    if kind == "rar":
+        unrar = shutil.which("unrar") or shutil.which("unrar-free")
+        if not unrar:
+            raise SastError("RAR non supporte (unrar indisponible)")
+        _extract_with_command([unrar, "x", "-y", input_path, workdir + "/"], workdir, "unrar")
+        return workdir
+
+    if kind == "7z":
+        sz = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+        if not sz:
+            raise SastError("7Z non supporte (7z indisponible)")
+        _extract_with_command([sz, "x", input_path, f"-o{workdir}", "-y"], workdir, "7z")
+        return workdir
+
+    shutil.copy2(input_path, os.path.join(workdir, os.path.basename(input_path)))
+    return workdir
+
+
+def _find_source_files(root, max_files=SAST_MAX_FILES):
     files = []
-    skip_dirs = {".git", "node_modules", "venv", ".venv", "__pycache__",
-                 "dist", "build", ".next", "target", ".idea", ".vscode"}
+    skip_dirs = {
+        ".git", "node_modules", "venv", ".venv", "__pycache__",
+        "dist", "build", ".next", "target", ".idea", ".vscode",
+        ".gradle", ".mvn", "bin", "obj", "coverage", ".pytest_cache",
+    }
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
         for f in filenames:
@@ -93,25 +263,6 @@ def _find_source_files(root, max_files=500):
     return files
 
 
-def _prepare_workdir(input_path):
-    workdir = tempfile.mkdtemp(prefix=f"sast_{uuid.uuid4().hex[:12]}_")
-    if os.path.isfile(input_path):
-        name = os.path.basename(input_path)
-        if name.lower().endswith(".zip"):
-            with zipfile.ZipFile(input_path, "r") as zf:
-                for member in zf.namelist():
-                    if member.startswith("/") or ".." in member:
-                        continue
-                    zf.extract(member, workdir)
-        else:
-            shutil.copy2(input_path, os.path.join(workdir, name))
-    elif os.path.isdir(input_path):
-        shutil.copytree(input_path, os.path.join(workdir, "src"))
-    else:
-        raise SastError("Entree invalide")
-    return workdir
-
-
 def run_semgrep(workdir):
     binary = find_semgrep()
     if not binary:
@@ -120,6 +271,8 @@ def run_semgrep(workdir):
     json_out = os.path.join(workdir, "_semgrep.json")
     env = os.environ.copy()
     env["SEMGREP_SEND_METRICS"] = "off"
+    env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+
     args = [
         binary, "scan",
         "--config=auto",
@@ -128,6 +281,7 @@ def run_semgrep(workdir):
         "--quiet",
         "--no-git-ignore",
         "--max-target-bytes=2000000",
+        "--timeout=30",
         workdir,
     ]
     result = _run(args, timeout=SAST_TIMEOUT, cwd=workdir, env=env)
@@ -170,7 +324,7 @@ def run_bandit(workdir):
         "-f", "json",
         "-o", json_out,
         "-ll",
-        "--exclude", ".git,node_modules,venv,.venv,__pycache__",
+        "--exclude", ".git,node_modules,venv,.venv,__pycache__,dist,build",
     ]
     result = _run(args, timeout=SAST_TIMEOUT, cwd=workdir)
 
@@ -200,8 +354,10 @@ def run_bandit(workdir):
 
 
 def _severity_rank(sev):
-    order = {"CRITICAL": 0, "ERROR": 1, "HIGH": 1, "WARNING": 2, "MEDIUM": 2,
-             "INFO": 3, "LOW": 3, "NOTE": 4}
+    order = {
+        "CRITICAL": 0, "ERROR": 1, "HIGH": 1, "WARNING": 2, "MEDIUM": 2,
+        "INFO": 3, "LOW": 3, "NOTE": 4,
+    }
     return order.get(str(sev).upper(), 5)
 
 
@@ -209,6 +365,7 @@ def _fix_suggestion(rule_id, message, tool):
     rule = rule_id.lower()
     msg = message.lower()
     suggestions = []
+
     if tool == "bandit":
         if "b301" in rule or "yaml" in msg:
             suggestions.append("Utiliser yaml.safe_load() au lieu de yaml.load().")
@@ -227,7 +384,14 @@ def _fix_suggestion(rule_id, message, tool):
         if "b324" in rule or "hashlib" in msg:
             suggestions.append("Utiliser hashlib.sha256() au lieu de hashlib.md5()/sha1().")
         if "b311" in rule or "random" in msg:
-            suggestions.append("Utiliser secrets module pour la generation de tokens.")
+            suggestions.append("Utiliser le module secrets pour la generation de tokens.")
+        if "b201" in rule or "flask" in msg:
+            suggestions.append("Desactiver debug=True en production.")
+        if "b501" in rule or "verify" in msg:
+            suggestions.append("Activer la verification des certificats TLS (verify=True).")
+        if "b506" in rule:
+            suggestions.append("Utiliser defusedxml au lieu du parseur XML standard.")
+
     if tool == "semgrep":
         if "sql" in msg or "injection" in msg:
             suggestions.append("Utiliser des requetes parametrees / ORM.")
@@ -243,8 +407,22 @@ def _fix_suggestion(rule_id, message, tool):
             suggestions.append("Verifier la signature JWT, refuser alg=none, utiliser des libs maintenues.")
         if "deserialization" in msg or "pickle" in msg:
             suggestions.append("Ne jamais deserialiser des donnees non fiables. Utiliser JSON.")
+        if "path traversal" in msg or "directory traversal" in msg:
+            suggestions.append("Normaliser les chemins et refuser les entrees contenant '..'.")
+        if "ssrf" in msg:
+            suggestions.append("Valider et whitelister les URLs sortantes.")
+        if "open redirect" in msg:
+            suggestions.append("Valider les URLs de redirection contre une whitelist.")
+        if "regex" in msg and ("dos" in msg or "redos" in msg):
+            suggestions.append("Simplifier les regex ou ajouter un timeout.")
+        if "cors" in msg:
+            suggestions.append("Restreindre les origines CORS autorisees.")
+        if "weak" in msg and "crypto" in msg:
+            suggestions.append("Utiliser des algorithmes modernes (AES-GCM, ChaCha20, SHA-256+).")
+
     if not suggestions:
         suggestions.append("Revoir le code autour de la ligne indiquee et appliquer le principe de moindre privilege.")
+
     return suggestions
 
 
@@ -259,12 +437,15 @@ def build_report(workdir, findings, semgrep_stderr, bandit_stderr):
     lines.append("=" * 70)
     lines.append("")
     lines.append(f"Total findings : {len(findings)}")
+
     sev_count = {}
     for f in findings:
         s = str(f.get("severity", "INFO")).upper()
         sev_count[s] = sev_count.get(s, 0) + 1
+
     for s in sorted(sev_count, key=_severity_rank):
         lines.append(f"  {s} : {sev_count[s]}")
+
     lines.append("")
     lines.append(f"Fichiers analyses : {len(by_file)}")
     lines.append(f"Semgrep : {'OK' if is_semgrep_available() else 'INDISPONIBLE'}")
@@ -274,26 +455,33 @@ def build_report(workdir, findings, semgrep_stderr, bandit_stderr):
     lines.append("")
 
     for file_path in sorted(by_file.keys()):
-        file_findings = sorted(by_file[file_path], key=lambda x: (_severity_rank(x["severity"]), x["line"]))
+        file_findings = sorted(
+            by_file[file_path],
+            key=lambda x: (_severity_rank(x["severity"]), x["line"]),
+        )
         lines.append(f"FICHIER : {file_path}")
         lines.append("-" * 70)
         for i, f in enumerate(file_findings, 1):
             lines.append(f"  [{i}] {f['severity']} - {f['rule_id']} ({f['tool']})")
             lines.append(f"      Ligne {f['line']}, colonne {f['column']}")
             lines.append(f"      {f['message'][:500]}")
+
             if f.get("cwe"):
                 cwes = [c for c in f["cwe"] if c]
                 if cwes:
                     lines.append(f"      CWE : {', '.join(str(c) for c in cwes)}")
+
             if f.get("owasp"):
                 lines.append(f"      OWASP : {', '.join(str(o) for o in f['owasp'][:3])}")
+
             if f.get("snippet"):
                 snippet = f["snippet"].strip()
-                lines.append(f"      Code :")
+                lines.append("      Code :")
                 for ln in snippet.splitlines()[:5]:
                     lines.append(f"        {ln[:120]}")
+
             suggestions = _fix_suggestion(f["rule_id"], f["message"], f["tool"])
-            lines.append(f"      CORRECTIONS SUGGEREES :")
+            lines.append("      CORRECTIONS SUGGEREES :")
             for s in suggestions:
                 lines.append(f"        - {s}")
             lines.append("")
@@ -335,6 +523,16 @@ def pack_workdir(workdir):
     return archive_path, size
 
 
+def is_supported_filename(filename):
+    if not filename:
+        return False
+    low = filename.lower()
+    for ext in SUPPORTED_EXTENSIONS:
+        if low.endswith(ext):
+            return True
+    return False
+
+
 def analyze(input_path):
     if not os.path.isfile(input_path) and not os.path.isdir(input_path):
         raise SastError("Entree introuvable")
@@ -342,13 +540,18 @@ def analyze(input_path):
     if os.path.isfile(input_path):
         size = os.path.getsize(input_path)
         if size > SAST_MAX_INPUT_SIZE:
-            raise SastError(f"Fichier trop volumineux (max {SAST_MAX_INPUT_SIZE // (1024*1024)} Mo)")
+            raise SastError(
+                f"Fichier trop volumineux (max {SAST_MAX_INPUT_SIZE // (1024*1024)} Mo)"
+            )
 
     workdir = _prepare_workdir(input_path)
 
     source_files = _find_source_files(workdir)
     if not source_files:
-        raise SastError("Aucun fichier source reconnu dans l'archive")
+        raise SastError(
+            "Aucun fichier source reconnu dans l'archive. "
+            "Extensions supportees : " + ", ".join(SOURCE_EXTENSIONS[:20]) + "..."
+        )
 
     semgrep_findings = []
     semgrep_stderr = ""
