@@ -25,13 +25,17 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git curl unzip
+          sudo apt-get install -y git curl unzip pipx
 
-      - name: Install rockyou wordlist
+      - name: Install Semgrep
         run: |
-          sudo mkdir -p /usr/share/wordlists
-          sudo wget -q https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt -O /usr/share/wordlists/rockyou.txt || true
-          ls -la /usr/share/wordlists/ || true
+          pipx install semgrep==1.99.0
+          pipx ensurepath
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Bandit
+        run: |
+          pip install bandit==1.7.10
 
       - name: Install Python dependencies
         run: |

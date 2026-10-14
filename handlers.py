@@ -203,9 +203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(user.id, user.username, user.first_name)
     increment_stat("messages_processed")
     if update.message and update.message.text:
-        await update.message.reply_text(
-            "Commande non reconnue. Utilise /help."
-        )
+        await update.message.reply_text("Commande non reconnue. Utilise /help.")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):

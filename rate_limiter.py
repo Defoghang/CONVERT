@@ -22,10 +22,7 @@ class SimpleRateLimiter(BaseRateLimiter):
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self._global_last
-            self._global_tokens = min(
-                self.per_second,
-                self._global_tokens + elapsed * self.per_second,
-            )
+            self._global_tokens = min(self.per_second, self._global_tokens + elapsed * self.per_second)
             self._global_last = now
             if self._global_tokens < 1:
                 wait = (1 - self._global_tokens) / self.per_second
@@ -39,9 +36,7 @@ class SimpleRateLimiter(BaseRateLimiter):
                 chat_id = data.get("chat_id")
             if chat_id is None and len(args) > 0:
                 first = args[0]
-                chat_id = getattr(first, "chat_id", None) or getattr(
-                    getattr(first, "chat", None), "id", None
-                )
+                chat_id = getattr(first, "chat_id", None) or getattr(getattr(first, "chat", None), "id", None)
             if chat_id is None and isinstance(kwargs, dict):
                 chat_id = kwargs.get("chat_id")
 
