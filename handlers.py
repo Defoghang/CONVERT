@@ -1,10 +1,18 @@
 import logging
 import os
 import shutil
+import time
 from telegram import Update
 from telegram.ext import ContextTypes
 from config import ADMIN_IDS
 from database import upsert_user, increment_stat
+from ai_service import (
+    AIError,
+    is_ai_available,
+    fix_all_files,
+    generate_fix_summary,
+)
+
 from sast_service import (
     SastError,
     analyze as sast_analyze,
